@@ -18,7 +18,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const rawIp = req.headers['x-forwarded-for'];
+  // ✅ IPを安定取得（Vercel対応）
+  const rawIp = req.headers['x-forwarded-for'] || req.socket?.remoteAddress;
   const ip = rawIp ? rawIp.split(',')[0].trim() : 'unknown';
 
   const today = new Date().toISOString().split('T')[0];
@@ -36,18 +37,22 @@ export default async function handler(req, res) {
       ? new Date(usage.last_request).getTime()
       : 0;
 
+    // 連打防止
     if (Date.now() - lastRequest < 3000) {
       return res.status(429).json({ error: '少し待ってください' });
     }
 
+    // 回数制限
     if (currentCount >= 3) {
       return res.status(429).json({ error: '本日の上限に達しました' });
     }
 
     const { prompt } = req.body;
-    if (!prompt) return res.status(400).json({ error: '入力が空です' });
+    if (!prompt) {
+      return res.status(400).json({ error: '入力が空です' });
+    }
 
-    // ✅ Gemini（修正版）
+    // ✅ Gemini（完全版）
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -56,6 +61,7 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           contents: [
             {
+              role: "user",
               parts: [
                 {
                   text: `あなたは伝説の営業マンです。以下を最強の営業トークに変換してください：${prompt}`
@@ -67,33 +73,19 @@ export default async function handler(req, res) {
       }
     );
 
+    // ❗ここ重要（エラー拾う）
     if (!response.ok) {
       const errText = await response.text();
+      console.error("Gemini Error:", errText);
       throw new Error(errText);
     }
 
     const data = await response.json();
 
+    // ✅ 安全に取り出す
     const resultText =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ??
       '生成に失敗しました';
 
-    await supabase.from('usage_limits').upsert(
-      {
-        identifier: ip,
-        date: today,
-        count: currentCount + 1,
-        last_request: new Date().toISOString()
-      },
-      { onConflict: 'identifier,date' }
-    );
-
-    res.status(200).json({
-      content: [{ type: 'text', text: resultText }]
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'サーバーエラー' });
-  }
-}
+    // ✅ Supabase更新（失敗しても処理は続ける）
+    const { error: upsertError
