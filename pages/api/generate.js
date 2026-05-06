@@ -43,7 +43,7 @@ export default async function handler(req, res) {
     }
 
     // 回数制限
-    if (currentCount >= 3) {
+    if (currentCount >= 100) {
       return res.status(429).json({ error: '本日の上限に達しました' });
     }
 
