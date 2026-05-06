@@ -14,37 +14,145 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const rawIp = req.headers['x-forwarded-for'] || req.socket?.remoteAddress;
+  const ip = rawIp ? rawIp.split(',')[0].trim() : 'unknown';
+
+  const today = new Date().toISOString().split('T')[0];
+
   try {
-    const ip =
-      req.headers['x-forwarded-for']?.split(',')[0] ||
-      req.socket?.remoteAddress ||
-      'unknown';
+    // ▼ usage取得（エラーもログ出す）
+    let currentCount = 0;
+    let lastRequest = 0;
 
     try {
-      const { data } = await supabase
+      const { data: usage, error } = await supabase
         .from('usage_limits')
-        .select('*')
-        .limit(1);
+        .select('count, last_request')
+        .eq('identifier', ip)
+        .eq('date', today)
+        .maybeSingle();
 
-      console.log('usage debug:', { ip, data });
+      if (error) {
+        console.error('Supabase fetch error:', error);
+      }
+
+      currentCount = usage?.count || 0;
+      lastRequest = usage?.last_request
+        ? new Date(usage.last_request).getTime()
+        : 0;
+
     } catch (e) {
-      console.log('Supabase無視:', e.message);
+      console.error('Supabase取得失敗:', e);
     }
 
-    // ▼ ここが本来の処理（仮でOK）
-    const resultText = "生成テスト成功";
+    // ▼ 制限
+    if (Date.now() - lastRequest < 3000) {
+      return res.status(429).json({
+        success: false,
+        error: '少し待ってください',
+      });
+    }
+
+    if (currentCount >= 100) {
+      return res.status(429).json({
+        success: false,
+        error: '本日の上限に達しました',
+      });
+    }
+
+    const { prompt } = req.body || {};
+    if (!prompt) {
+      return res.status(400).json({
+        success: false,
+        error: '入力が空です',
+      });
+    }
+
+    // ▼ Gemini
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `あなたは伝説の営業マンです。以下を最強の営業トークに変換してください：${prompt}`
+                }
+              ]
+            }
+          ]
+        }),
+      }
+    );
+
+    // ❗ここを改善（throwしない）
+    if (!response.ok) {
+      const errText = await response.text();
+
+      console.error("Gemini Error FULL:", errText);
+
+      return res.status(500).json({
+        success: false,
+        error: 'Gemini APIエラー',
+        detail: errText, // ← フロントで見れる
+      });
+    }
+
+    const data = await response.json();
+
+    console.log('Gemini raw response:', JSON.stringify(data));
+
+    const resultText =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!resultText) {
+      return res.status(500).json({
+        success: false,
+        error: '生成結果が空',
+        detail: data,
+      });
+    }
+
+    // ▼ usage更新（失敗しても無視）
+    try {
+      const { error } = await supabase.from('usage_limits').upsert({
+        identifier: ip,
+        date: today,
+        count: currentCount + 1,
+        last_request: new Date().toISOString(),
+      });
+
+      if (error) {
+        console.error('Supabase upsert error:', error);
+      }
+
+    } catch (e) {
+      console.error('Supabase更新失敗:', e);
+    }
 
     return res.status(200).json({
       success: true,
-      text: resultText, // ← ★これが重要
+      text: resultText,
     });
 
   } catch (err) {
-    console.error('API fatal error:', err);
+    console.error('API fatal error:', {
+      message: err.message,
+      stack: err.stack,
+    });
 
     return res.status(500).json({
       success: false,
       error: err.message,
+      detail: err.stack, // ← デバッグ用
     });
   }
-}
+      }
