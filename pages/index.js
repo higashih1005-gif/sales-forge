@@ -74,7 +74,11 @@ export default function SalesForge() {
         body: JSON.stringify({ prompt }),
       });
       const data = await res.json();
-      setOutput(data.content?.find((b) => b.type === "text")?.text || "エラーが発生しました");
+      if (data.success && data.text) {
+        setOutput(data.text);
+      } else {
+        setOutput(data.error || "エラーが発生しました");
+      }
     } catch {
       setOutput("通信エラーが発生しました。再度お試しください。");
     } finally {
